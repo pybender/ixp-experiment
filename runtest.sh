@@ -10,11 +10,11 @@
 #                        |
 #   ______            ___|__            ______
 #  |      |          |      |          |      |
-#  | AS1  |--------+-| IXP  |-+--------| AST1 |-------+   ______
-#  |______|        | |______| |        |______|       |  |      |
-#   ______         |          |         ______        +--| AST3 |
-#  |      |        |          |        |      |       |  |______|
-#  | AS2  |--------+          +--------| AST2 |-------+     
+#  | AS1  |--------+-| IXP  |-+--------| AST1 |--+   ______     ______
+#  |______|        | |______| |        |______|  |  |      |   |      |
+#   ______         |          |         ______   +--|TESTSW|---| AST3 |
+#  |      |        |          |        |      |  |  |______|   |______|
+#  | AS2  |--------+          +--------| AST2 |--+     
 #  |______|        |                   |______|
 #                  |
 #   ______         |
@@ -44,6 +44,7 @@ RS_IPADDR=172.16.254.254
 RS_ASN=65353
 
 # Member ASes
+BASE_ASN=100
 AS_NAME=as
 # IXP Switch
 IXP_SW='ixp-sw'
@@ -61,7 +62,7 @@ AS_T2_IPADDR=172.16.254.252
 AS_T3=as-t3
 AS_T3_ASN=65350
 
-TEST_SWITCH=test-sw
+TEST_SW='test-sw'
 TEST_NET=20.0.0
 
 #Commands
@@ -97,16 +98,13 @@ create_member_as() {
     local asn=$2
     local ipaddr=$3
     local net=$4
-    local switch=$5
-    local exist=$( check_docker $as_name )
-    if [[ $exist -lt 1 ]]; then
-        echo "Creating a member AS: name=$as_name, asn=$asn, ip=$ipaddr"
-        local configDir=$PWD/configs/$as_name
-        mkdir $configDir 2> /dev/null
-        cp -fP $PWD/configs/base/* $configDir/.
-        local bgpd_conf=$configDir/bgpd.conf
-        local zebra_conf=$configDir/zebra.conf
-        cat > $bgpd_conf <<EOF
+    echo "Creating a Docker container for AS: name=$as_name, asn=$asn, ip=$ipaddr"
+    local configDir=$PWD/configs/$as_name
+    mkdir $configDir 2> /dev/null
+    cp -fP $PWD/configs/base/* $configDir/.
+    local bgpd_conf=$configDir/bgpd.conf
+    local zebra_conf=$configDir/zebra.conf
+    cat > $bgpd_conf <<EOF
 !
 ! BGP configuration for $as_name
 !
@@ -131,39 +129,18 @@ password zebra
 line vty
 !
 EOF
-        # Create a Docker container for member ASes
-        docker run --privileged -d -P --name $as_name -v $configDir:/etc/quagga -v $LOG_DIR:/tmp/ $QUAGGA_IMAGE
-
-    elif [[ $exist -eq 1 ]]; then
-        #echo "Start a Docker container for $as_name"
-        docker start $as_name
-
-    else
-        return
-    fi
-    # Add an interface to IXP Switch
-    #echo "Connect the AS Docker container to IXP switch"
-    $PIPEWORK $IXP_SW -i eth1 -l veth1$as_name $as_name $ipaddr/16
-    # Connect the AS router to the AS switch
-    $PIPEWORK $AS_SW -i eth2 -l veth2$as_name $as_name $net.1/24
-
+    docker rm -f $as_name
+    docker run --privileged -d -P --name $as_name -v $configDir:/etc/quagga -v $LOG_DIR:/tmp/ $QUAGGA_IMAGE
 }
 
-start_ixp() {
-    NUM_MEMBER_ASES=$1
-    echo "Start IXP with $NUM_MEMBER_ASES member ASes"
-    #Create an OVS switch as the IXP switch
-    $OVSCTL add-br $IXP_SW 2> /dev/null
-    $OVSCTL add-br $AS_SW 2> /dev/null
-
-    exist=$(check_docker $RS_NAME)
-    if [[ $exist -lt 1 ]]; then
-        echo "Create IXP Route Server and Switch"
-        local configDir=$PWD/configs/$RS_NAME
-        mkdir $configDir 2> /dev/null
-        cp -fP $PWD/configs/base/* $configDir/.
-        # Generate bgpd.conf
-        cat > $configDir/bgpd.conf <<EOF
+create_route_server() {
+    local num=$1 # Number of member ASes
+    echo "Create a Docker contaner for IXP Route Server"
+    local configDir=$PWD/configs/$RS_NAME
+    mkdir $configDir 2> /dev/null
+    cp -fP $PWD/configs/base/* $configDir/.
+    # Generate bgpd.conf
+    cat > $configDir/bgpd.conf <<EOF
 !
 ! BGP configuration for Route Server
 !
@@ -179,29 +156,24 @@ bgp multiple-instance
 router bgp $RS_ASN view RS
  bgp router-id $RS_IPADDR
 EOF
-        local asn=100
-        for i in `seq 1 $NUM_MEMBER_ASES`; do
-            if [[ $i -lt 255 ]]; then 
-                x=$i
-                y=0
-            else
-                x=$(($i % 254))
-                y=$(($i / 254))
-            fi
-            local ipaddr="172.16.$y.$x"
-            local net=10.$y.$x
+    for i in `seq 1 $num`; do
+        if [[ $i -lt 255 ]]; then 
+            x=$i
+            y=0
+        else
+            x=$(($i % 254))
+            y=$(($i / 254))
+        fi
+        local ipaddr="172.16.$y.$x"
+        local net=10.$y.$x
             cat >> $configDir/bgpd.conf <<EOF
- neighbor $ipaddr remote-as $(($asn * $i))
+ neighbor $ipaddr remote-as $(($BASE_ASN * $i))
  neighbor $ipaddr route-server-client
 ! neighbor $ipaddr soft-reconfiguration inbound
 !
 EOF
-            create_member_as $AS_NAME$i $(($asn * $i)) $ipaddr $net
-            # Connect the AS router to the AS switch
-            $PIPEWORK $AS_SW -i eth2 -l veth2$AS_NAME$i $AS_NAME$i $net.1/24
-        done
-
-        cat >> $configDir/bgpd.conf <<EOF
+    done
+    cat >> $configDir/bgpd.conf <<EOF
  neighbor $AS_T1_IPADDR remote-as $AS_T1_ASN
  neighbor $AS_T1_IPADDR route-server-client
 ! neighbor $AS_T1_IPADDR soft-reconfiguration inbound
@@ -212,54 +184,43 @@ EOF
 line vty
 !
 EOF
-        cat > $configDir/zebra.conf <<EOF
+    cat > $configDir/zebra.conf <<EOF
 hostname $RS_NAME
 password zebra
 line vty
 EOF
-        # Create a Docker container for the Route Server
-        docker run --privileged -d -P --name $RS_NAME -v $PWD/configs/$RS_NAME:/etc/quagga -v $PWD/$LOG_DIR:/tmp $QUAGGA_IMAGE
-
-    elif [[ $exist -eq 1 ]]; then
-        #Create an OVS switch as the IXP switch
-        $OVSCTL add-br $IXP_SW 2> /dev/null
-        asn=100
-        for i in `seq 1 $NUM_MEMBER_ASES`; do
-             if [ $i -lt 255 ]; then 
-                x=$i
-                y=0
-            else
-                x=$(($i % 254))
-                y=$(($i / 254))
-            fi
-            ipaddr=172.16.$y.$x
-            net=10.$y.$x
-            create_member_as $AS_NAME$i $(($asn*$i)) $ipaddr $net
-        done
-        #echo "Start the Route Server Docker container"
-        docker start $RS_NAME
-    else
-        return
-    fi
-    #echo "Connect the Route Server Docker to IXP switch"
-    $PIPEWORK $IXP_SW -i eth1 -l veth1$RS_NAME $RS_NAME $RS_IPADDR/16
-
+    docker rm -f $RS_NAME
+    docker run --privileged -d -P --name $RS_NAME -v $PWD/configs/$RS_NAME:/etc/quagga -v $PWD/$LOG_DIR:/tmp $QUAGGA_IMAGE
 }
 
-# Create  and Start Test ASes AST1, AST2 and AST3
-start_as_test() {
-    local NUM_MEMBER_ASES=$1
-    $OVSCTL add-br $TEST_SWITCH 2> /dev/null
+create_ixp() {
+    local num=$1 # Number of member ASes
+    echo "Create IXP with $num member ASes"
+    create_route_server $num
+    
+    # Create member ASes
+    for i in `seq 1 $num`; do
+         if [ $i -lt 255 ]; then 
+            x=$i
+            y=0
+        else
+            x=$(($i % 254))
+            y=$(($i / 254))
+        fi
+        local ip1=172.16.$y.$x
+        local ip2=10.$y.$x.1
+        create_member_as $AS_NAME$i $ip1 $ip2
+    done
+}
 
-    local exist=$( check_docker $AS_T1 )
-    if [[ $exist -lt 1 ]]; then
-        echo "Creating BGP router: name=$AS_T1, asn=$AS_T1_ASN"
-        local configDir=$PWD/configs/$AS_T1
-        mkdir $configDir 2> /dev/null
-        cp -fP $PWD/configs/base/* $configDir/.
-        local bgpd_conf=$configDir/bgpd.conf
-        local zebra_conf=$configDir/zebra.conf
-        cat > $bgpd_conf <<EOF
+create_test_ases() {
+    echo "Creating Test Router name=$AS_T1, asn=$AS_T1_ASN"
+    local configDir=$PWD/configs/$AS_T1
+    mkdir $configDir 2> /dev/null
+    cp -fP $PWD/configs/base/* $configDir/.
+    local bgpd_conf=$configDir/bgpd.conf
+    local zebra_conf=$configDir/zebra.conf
+    cat > $bgpd_conf <<EOF
 !
 ! BGP configuration for $AS_T1
 !
@@ -287,27 +248,16 @@ password zebra
 line vty
 !
 EOF
-        # Create a Docker container for member ASes
-        docker run --privileged -d -P --name $AS_T1 -v $configDir:/etc/quagga -v $LOG_DIR:/tmp/ $QUAGGA_IMAGE
-
-    elif [[ $exist -eq 1 ]]; then
-        docker start $AS_T1
-    fi
-    # Add the as to switch if it is not already
-    if [[ $exist -lt 2 ]]; then
-        $PIPEWORK $IXP_SW -i eth1 -l veth1$AS_T1 $AS_T1 $AS_T1_IPADDR/16
-        $PIPEWORK $TEST_SWITCH -i eth2 -l veth2$AS_T1 $AS_T1 $TEST_NET.1/24
-    fi
-
-    local exist=$( check_docker $AS_T2 )
-    if [[ $exist -lt 1 ]]; then
-        echo "Creating BGP router: name=$AS_T2, asn=$AS_T2_ASN"
-        local configDir=$PWD/configs/$AS_T2
-        mkdir $configDir 2> /dev/null
-        cp -fP $PWD/configs/base/* $configDir/.
-        local bgpd_conf=$configDir/bgpd.conf
-        local zebra_conf=$configDir/zebra.conf
-        cat > $bgpd_conf <<EOF
+    docker rm -f $AS_T1
+    docker run --privileged -d -P --name $AS_T1 -v $configDir:/etc/quagga -v $LOG_DIR:/tmp/ $QUAGGA_IMAGE
+    
+    echo "Creating BGP router: name=$AS_T2, asn=$AS_T2_ASN"
+    local configDir=$PWD/configs/$AS_T2
+    mkdir $configDir 2> /dev/null
+    cp -fP $PWD/configs/base/* $configDir/.
+    local bgpd_conf=$configDir/bgpd.conf
+    local zebra_conf=$configDir/zebra.conf
+    cat > $bgpd_conf <<EOF
 !
 ! BGP configuration for $AS_T2
 !
@@ -341,29 +291,16 @@ password zebra
 line vty
 !
 EOF
-        # Create a Docker container for member ASes
-        docker run --privileged -d -P --name $AS_T2 -v $configDir:/etc/quagga -v $LOG_DIR:/tmp/ $QUAGGA_IMAGE
-
-    elif [[ $exist -eq 1 ]]; then
-        #echo "Temporary disable AST2"
-        docker start $AS_T2
-    fi
-    # Add the as to switch if it is not already
-    if [[ $exist -lt 2 ]]; then
-        #echo "Temporary disable AST2"
-        $PIPEWORK $IXP_SW -i eth1 -l veth1$AS_T2 $AS_T2 $AS_T2_IPADDR/16
-        $PIPEWORK $TEST_SWITCH -i eth2 -l veth2$AS_T2 $AS_T2 $TEST_NET.2/24
-    fi
-
-    local exist=$( check_docker $AS_T3)
-    if [[ $exist -lt 1 ]]; then
-        echo "Creating a test router: name=$AS_T3, asn=$AS_T3_ASN"
-        local configDir=$PWD/configs/$AS_T3
-        mkdir $configDir 2> /dev/null
-        cp -fP $PWD/configs/base/* $configDir/.
-        local bgpd_conf=$configDir/bgpd.conf
-        local zebra_conf=$configDir/zebra.conf
-        cat > $bgpd_conf <<EOF
+    docker rm -f $AS_T2
+    docker run --privileged -d -P --name $AS_T2 -v $configDir:/etc/quagga -v $LOG_DIR:/tmp/ $QUAGGA_IMAGE
+   
+    echo "Creating a test router: name=$AS_T3, asn=$AS_T3_ASN"
+    local configDir=$PWD/configs/$AS_T3
+    mkdir $configDir 2> /dev/null
+    cp -fP $PWD/configs/base/* $configDir/.
+    local bgpd_conf=$configDir/bgpd.conf
+    local zebra_conf=$configDir/zebra.conf
+    cat > $bgpd_conf <<EOF
 !
 ! BGP configuration for $AS_T3
 !
@@ -389,110 +326,322 @@ password zebra
 line vty
 !
 EOF
-        # Create a Docker container for member ASes
-        docker run --privileged -d -P --name $AS_T3 -v $configDir:/etc/quagga -v $LOG_DIR:/tmp/ $QUAGGA_IMAGE
-
-    elif [[ $exist -eq 1 ]]; then
-        #echo "Start a Docker container for $AS_T3"
-        docker start $AS_T3
-    fi
-
-    if [[ $exist -lt 2 ]]; then
-        $PIPEWORK $TEST_SWITCH -i eth1 -l veth1$AS_T3 $AS_T3 $TEST_NET.3/24
-        # Prepare fping target files
-        head -$NUM_MEMBER_ASES $PWD/targets.txt > $PWD/configs/$AS_T3/mytargets.txt
-        # Start fping
-        docker exec -d $AS_T3 /bin/bash -c "sleep 40; fping -l -Q 1 -f /etc/quagga/mytargets.txt &> /tmp/fping.out"
-    fi
+    docker rm -f $AS_T3
+    docker run --privileged -d -P --name $AS_T3 -v $configDir:/etc/quagga -v $LOG_DIR:/tmp/ $QUAGGA_IMAGE
+}
+start_member_as() {
+    local as_name=$1
+    local ip1=$2
+    local ip2=$3
+    echo "Start member AS $as_name"
+    docker stop $as_name 1> /dev/null
+    docker start $as_name 1> /dev/null
+    # Add an interface to IXP Switch
+    $PIPEWORK $IXP_SW -i eth1 -l veth1$as_name $as_name $ip1/16
+    # Connect the AS router to the AS switch
+    $PIPEWORK $AS_SW -i eth2 -l veth2$as_name $as_name $ip2/24
 }
 
-stop_as_test() {
-    # Stop the test net
-    echo "Stop Test ASes"
-    docker stop $AS_T1 &> /dev/null
-    docker stop $AS_T2 &> /dev/null
-    docker stop $AS_T3 &> /dev/null
-    $OVSCTL del-br $TEST_SWITCH
+stop_member_as() {
+    echo "Stop member AS $1"
+    local as_name=$1
+    docker stop $as_name 1> /dev/null
+}
+
+start_route_server() {
+    echo "Start Route Server"
+    docker stop $RS_NAME 1> /dev/null
+    docker start $RS_NAME 1> /dev/null
+    $PIPEWORK $IXP_SW -i eth1 -l veth1$RS_NAME $RS_NAME $RS_IPADDR/16
+}
+
+stop_route_server() {
+    echo "Stop Route Server"
+    docker stop $RS_NAME 1> /dev/null
+}
+
+start_ixp() {
+    num=$1 # Number of member ASes
+    #Create an OVS switch as the IXP switch
+    $OVSCTL add-br $IXP_SW 2> /dev/null
+    $OVSCTL add-br $AS_SW 2> /dev/null
+    start_route_server 
+    for i in `seq 1 $num`; do
+         if [ $i -lt 255 ]; then 
+            x=$i
+            y=0
+        else
+            x=$(($i % 254))
+            y=$(($i / 254))
+        fi
+        local ip1="172.16.$y.$x"
+        local ip2=10.$y.$x.1
+        start_member_as $AS_NAME$i $ip1 $ip2
+    done
 }
 
 stop_ixp() {
-    local NUM_MEMBER_ASES=$1
-    for i in `seq 1 $NUM_MEMBER_ASES`; do
-        docker stop $AS_NAME$i
+    echo "Stop the IXP network of $1 member ASes"
+    local n=$1 # Number of member ASes
+    stop_route_server
+    for i in `seq 1 $n`; do
+        stop_member_as $AS_NAME$i
     done
-    
-    docker stop $RS_NAME
-    $OVSCTL del-br $IXP_SW &> /dev/null
-    $OVSCTL del-br $AS_SW &> /dev/null
+    # Delete an OVS switch as the IXP switch
+    $OVSCTL del-br $IXP_SW 2> /dev/null
+    $OVSCTL del-br $AS_SW 2> /dev/null
 }
 
-run_test() {
-    # Run with m member ases
-    local m=$1
-    # Run the test for n times
-    local t=$2
-    local testname=tlong
-    echo "Run Tests with $m member ASes for $t times"
-    rm -r $LOG_DIR/$testname/$m >& /dev/null
-    for k in `seq 1 $t`; do
-        echo "Run: $k"
-        sleep 1 # Before the next run
-        # Delete old logs
-        local dir=$LOG_DIR/$testname/$m/run$k
-        mkdir -p $dir
-        rm $LOG_DIR/*.*
-        # Start the IXP network
-        start_ixp $m
-        # Start the Test network
-        start_as_test $m
-        sleep 60 # To make sure that the IXP is converged before the announcement
-        # Telnet to AST1 and announces a prefix
-        # Create announcement command file for netcat
-#        cat > $PWD/announce.cmd <<EOF
-#bgpd
-#enable
-#configure terminal
-#router bgp $AS_T3_ASN
-#network $TEST_NET.0/24
-#end
-#exit
-#EOF
-        cat > $PWD/withdraw.cmd <<EOF
+start_test_ast1() {
+    echo "Start Test AST1"
+    docker stop $AS_T1 &> /dev/null
+    docker start $AS_T1 1> /dev/null
+    $PIPEWORK $IXP_SW -i eth1 -l veth1$AS_T1 $AS_T1 $AS_T1_IPADDR/16
+    $PIPEWORK $TEST_SW -i eth2 -l veth2$AS_T1 $AS_T1 $TEST_NET.1/24
+}
+stop_test_ast1() {
+    echo "Stop Test AST1"
+    docker stop $AS_T1 1> /dev/null
+}
+
+start_test_ast2() {
+    echo "Start Test AST2"
+    docker stop $AS_T2 &> /dev/null
+    docker start $AS_T2 1> /dev/null
+    $PIPEWORK $IXP_SW -i eth1 -l veth1$AS_T2 $AS_T2 $AS_T2_IPADDR/16
+    $PIPEWORK $TEST_SW -i eth2 -l veth2$AS_T2 $AS_T2 $TEST_NET.2/24
+}
+stop_test_ast2() {
+    echo "Stop Test AST2"
+    docker stop $AS_T2 1> /dev/null
+}
+
+start_test_ast3() {
+    echo "Start Test AST3"
+    docker stop $AS_T3 &> /dev/null
+    docker start $AS_T3 1> /dev/null
+    $PIPEWORK $TEST_SW -i eth1 -l veth1$AS_T3 $AS_T3 $TEST_NET.3/24
+}
+stop_test_ast3() {
+    echo "Stop Test AST3"
+    docker stop $AS_T3 1> /dev/null
+}
+
+run_tup_test() {
+    ntimes=$1 # Run for ntimes
+    nases=$2 # Number of member ASes
+    echo "Run Tup test for $nases of member ASes for $ntimes times"
+    local logdir=$LOG_DIR/tup/$nases
+    rm -r $logdir 2> /dev/null
+    mkdir -p $logdir 2> /dev/null
+    for l in `seq 1 $ntimes`; do
+        sleep 10 
+        echo "It's run $l"
+        mkdir -p $logdir/run$l 2> /dev/null
+        rm -f $LOG_DIR/*.dump 2> /dev/null
+        $OVSCTL add-br $TEST_SW 1> /dev/null
+        start_ixp $nases
+        start_test_ast1
+        sleep 40 # Wait for the IXP becomes stable
+        start_test_ast3 
+        sleep 70 # Wait for the Update reaches all ASes
+        echo "Stop the run"
+        cp -fp $LOG_DIR/*updates.dump $logdir/run$l/.
+        chmod 777 $logdir/run$l/*
+        stop_ixp $nases
+        sleep 1
+        stop_test_ast1
+        stop_test_ast3
+        $OVSCTL del-br $TEST_SW 1> /dev/null
+    done
+}
+
+run_tdown_test() {
+    ntimes=$1 # Run for ntimes
+    nases=$2 # Number of member ASes
+    echo "Start the test"
+    logdir=$LOG_DIR/tdown
+    mkdir -p $logdir 2> /dev/null
+
+    for i in `seq 1 $ntimes`; do
+        mkdir -p $logdir/$i 2> /dev/null
+        rm -f $LOG_DIR/*.dump
+        $OVSCTL add-br $TEST_SW 1> /dev/null
+        start_ixp $nases
+        start_test_ast1
+        start_test_ast3 
+        sleep 60 
+        # Withdraw a prefix, netcat to AS_T3 and configure BGP to withdraw the prefix
+        cat > $PWD/withdrawal.cmd <<EOF
 bgpd
 enable
 configure terminal
-router bgp $AS_T1_ASN
-neighbor 172.16.254.254 prefix-list PL1 out
+router bgp $AS_T3_ASN
+no network 20.0.0.0/24
 end
-clear ip bgp 172.16.254.254 out
 exit
 EOF
-
-        local as_t1_ipaddr=`$PWD/getdockerip $AS_T1`
-        echo "AST1 withdraws a prefix"
-        nc $as_t1_ipaddr 2605 < $PWD/withdraw.cmd &>/dev/null
-        # Shutdown the interface to AST3 to make prevent packet going through this intf
-        #docker exec -d $AS_T1 /bin/bash/ -c "ifconfig eth2 down"
-        ifconfig veth2as-t1 down
-        # Sleep for xxx seconds to make sure all routers get updated
-        sleep 120
-        # Copy BGP dump to that folder
-        cp -fP $LOG_DIR/*updates.dump $dir/.
-        cp -fP $LOG_DIR/fping.out $dir/.
-        chmod 777 $dir/*
-        stop_ixp $m
-        sleep 1
-        stop_as_test
+        local as_t3_ip=`$PWD/getdockerip $AS_T3`
+        echo "Withdraw the prefix"
+        nc $as_t3_ip 2605 < $PWD/withdrawal.cmd &>/dev/null
+        sleep 30 
+        echo "Stop the test"
+        cp -fp $LOG_DIR/*updates.dump $logdir/$i/.
+        chmod 777 $logdir/$i/*
+        stop_ixp $nases
+        stop_test_ast1
+        stop_test_ast3
+        $OVSCTL del-br $TEST_SW 1> /dev/null
     done
 }
-stop_test() {
+
+ast3_start_fping() {
+    local num=$1
+    echo "Start fping in AST3"
+    # Prepare fping target files
+    head -$num $PWD/targets.txt > $PWD/configs/$AS_T3/mytargets.txt
+    # Start fping
+    docker exec -d $AS_T3 /bin/bash \
+        -c "fping -l -Q 1 -f /etc/quagga/mytargets.txt &> /tmp/fping.out"
+}
+ast3_stop_fping() {
+    echo "Stop fping in AST3"
+    docker exec -d $AS_T3 /bin/bash -c "pkill -x fping"
+}
+
+ast1_announce() {
+    local ip=`$PWD/getdockerip $AS_T1`
+    echo "AST1 announces a prefix"
+    nc -i 1 $ip 2605 < $PWD/ast1_announce.cmd &>/dev/null
+}
+
+ast1_withdraw() {
+    local ip=`$PWD/getdockerip $AS_T1`
+    echo "AST1 withdraws a prefix"
+    nc -i 1 $ip 2605 < $PWD/ast1_withdraw.cmd &>/dev/null
+}
+
+ast1_discards() {
+    local num=$1
+    echo "AST1 discards packets from 10.x.x.x"
+    for q in `seq 1 $num`; do
+         if [ $q -lt 255 ]; then 
+            x=$q
+            y=0
+        else
+            x=$(($q % 254))
+            y=$(($q / 254))
+        fi
+        local ip=10.$y.$x.1
+        docker exec -d $AS_T1 /bin/bash -c "ip route add $ip via 127.0.0.1"
+    done
+}
+
+ast1_unfilter_routes() {
+    local ip=`$PWD/getdockerip $AS_T1`
+    echo "AST1 unfilters a prefix"
+    nc -i 1 $ip 2605 < $PWD/ast1_unfilter_routes.cmd &>/dev/null
+}
+
+route_check() {
+    local as_name=$1
+    local route=$2
+    local ip=`$PWD/getdockerip $as_name`
+    r=$(nc $ip 2605 < $PWD/command.txt 2>&1)
+    if ! printf -- '%s' "$r" | egrep -q -- "$route"; then
+        return 1
+    else
+        return 0
+    fi
+}
+
+ping_check() {
+    local host=$1
+    local out=$(docker exec $AS_T3 /bin/bash -c "fping $host")
+    #echo $out
+    if ! printf -- '%s' "$out" | egrep -q -- "alive"; then
+        return 1
+    else
+        return 0
+    fi
+}
+
+
+run_tlong_test() {
+    nases=$1 # Number of member ASes
+    ntimes=$2 # Run for ntimes
+    echo "Run Tlong test for $nases of member ASes for $ntimes times"
+    local logdir=$LOG_DIR/tlong/$nases
+    rm -r $logdir 2> /dev/null
+    mkdir -p $logdir 2> /dev/null
+    for l in `seq 1 $ntimes`; do
+        echo "It's run $l"
+        mkdir -p $logdir/run$l 2> /dev/null
+        rm -f $LOG_DIR/*.dump
+        #truncate -s 0 $LOG_DIR/*updates.dump # Clear Update log content
+        $OVSCTL add-br $TEST_SW 1> /dev/null
+        start_ixp $k
+        while true;
+        do
+            if route_check as10 10.0.1.0; then
+                break
+            fi
+            sleep 2
+        done
+        sleep 10
+        start_test_ast1
+        start_test_ast2
+        while true;
+        do
+            if route_check $AS_T2 10.0.10.0; then
+                if route_check $AS_T1 10.0.10.0; then
+                    break
+                fi
+            fi
+            sleep 2
+        done
+        sleep 10
+        start_test_ast3
+        echo "waiting for the IXP to become stable..."
+        lm=0
+        while [[ $lm -lt 15 ]]
+        do
+            if ping_check 10.0.1.1; then
+                break
+            fi
+            sleep 2
+            lm=$[$lm + 1]
+        done
+        sleep 2
+        ast3_start_fping $nases
+        sleep 10
+        ast1_withdraw
+        ast1_discards $nases # Pretend to be a failure
+        sleep 30 # Wait for the withdrawal to progagate
+        echo "Stop the run"
+        cp -fp $LOG_DIR/*updates.dump $logdir/run$l/.
+        cp -fp $LOG_DIR/fping.out $logdir/run$l/.
+        chmod 777 $logdir/run$l/*
+        stop_test_ast3
+        stop_test_ast1
+        stop_test_ast2
+        stop_ixp $nases
+        $OVSCTL del-br $TEST_SW 1> /dev/null
+        sleep 10
+    done
+}
+
+stop_on_interrupt() {
     echo "Test interrupted"
     stop_ixp 100 
-    stop_as_test
+    docker stop $AS_T1 &> /dev/null
+    docker stop $AS_T2 &> /dev/null
+    docker stop $AS_T3 &> /dev/null
+    $OVSCTL del-br $TEST_SW 1> /dev/null
     exit 0
 }
-trap "stop_test" INT
+trap "stop_on_interrupt" INT 
 # Main program
-for it in `seq 10 10 100`; do
-    run_test $it 10
+for k in `seq 10 10 100`; do
+    run_tlong_test $k 10 
 done

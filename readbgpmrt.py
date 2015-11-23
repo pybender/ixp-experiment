@@ -23,10 +23,10 @@ def main():
     buf = struct.pack("!BBBBB", 24, 20, 0, 0, 0)
     observed_prefix = dpkt.bgp.RouteIPV4(buf)
 
-    LOG_DIR = "/home/trungth/git/ixp-lab/logs/withdrawal"
+    LOG_DIR = "/home/trungth/git/ixp-lab/logs/tlong"
     data = []
     testids = []
-    for n in range(60, 61, 10):
+    for n in range(30, 31, 10):
         sd = join(LOG_DIR, str(n))
         if not exists(sd):
             continue
@@ -37,10 +37,10 @@ def main():
         #print "Run#(%d)\tAST1\t\tRS\t\tAS_AVG\t\tCONVG(s)" % n
         for d in listdir(sd):
             p = join(sd, d)
-            (ts1, ts2, avg, cvg) = correlate(p, num_member_ases, observed_prefix)
+            (ts1, avg, cvg) = correlate(p, num_member_ases, observed_prefix)
             if ts1 == 0:
                 continue
-            #print "%s\t%d\t%d\t%d\t%d" % ( d[3:], ts1, ts2, avg, cvg )
+            #print "%s\t%d\t%d\t%d" % ( d, ts1, avg, cvg )
             ar.append(cvg)
         data.append(ar)
     #print data
@@ -54,26 +54,30 @@ def correlate(d, num_ases, observed_prefix):
     ts = []
     # Read timestamp of the announcement sent by AST1
     #ts.append(get_update_timestamp(join(d, "as-t1-updates.dump"), observed_prefix))
-    ts.append(get_update_timestamp(join(d, "rs-updates.dump"), observed_prefix))
-    ts.append(get_update_timestamp(join(d, "as1-updates.dump"), observed_prefix))
+    ts.append(get_update_timestamp(join(d, "rs-updates.dump"), 0, observed_prefix))
+    #ts.append(get_update_timestamp(join(d, "as1-updates.dump"), 1, observed_prefix))
 
-    #for i in range(1, num_ases):
-    #    ts.append( get_update_timestamp(
-    #                join(d, "as%d-updates.dump" % i),
-    #                observed_prefix) )
+    for i in range(1, num_ases):
+        ts.append( get_update_timestamp(
+                    join(d, "as%d-updates.dump" % i), 1,
+                    observed_prefix) )
     ma = max(ts) # Max TS
-    #ts1 = ts[0] # TS of UPDATE at AST1
+    ts1 = ts[0] # TS of UPDATE at AST1
     #ts2 = ts[1] # TS of UPDATE at RS
-    #avg = sum(ts[2:]) / float(len(ts[2:])) # Average TS of UPDATE at member ASes)
-    avg = 0
-    #return (ts1, ts2, avg, ma - ts1)
-    return (0, 0, 0, 0)
+    cvg = []
+    for i in ts[1:]:
+        cvg.append( i - ts1 )
+    avg = sum(cvg) / float(len(cvg)) # Average TS of UPDATE at member ASes)
+    #avg = sum(ts[1:])/float(len(ts[1:])) - ts1
+    print (ts1, ts[1:])
+    return (ts1, ma - ts1, avg)
+    #return (0, 0, 0, 0)
 
-def get_update_timestamp(fname, observed_prefix):
+# utype = 1: announce, utype=0: withdraw
+def get_update_timestamp(fname, utype, observed_prefix):
     f = None
     try:
         f = open(fname, 'rb')
-        print fname
     except:
         f = None
 
@@ -103,23 +107,26 @@ def get_update_timestamp(fname, observed_prefix):
                 if bgp_m.type == dpkt.bgp.OPEN:
                     continue
                 elif bgp_m.type == dpkt.bgp.UPDATE:
-                    routes = bgp_m.update.announced
+                    if utype:
+                        routes = bgp_m.update.announced
+                    else:
+                        routes = bgp_m.update.withdrawn
+
                     for r in routes:
-                        #print repr(r)
                         if r == observed_prefix:
-                            #t = time.ctime(mrt_h.ts)
-                            """print bgp_h.src_as, bgp_h.dst_as, bgp_h.intf, bgp_h.family, \
-                                socket.inet_ntoa(struct.pack('!L', bgp_h.src_ip)), \
-                                socket.inet_ntoa(struct.pack('!L', bgp_h.dst_ip))"""
-                            #print fname, mrt_h.ts
-                            print mrt_h.ts, bgp_h.src_as, bgp_h.dst_as
-                            print bgp_m.update.attributes
-                            #return mrt_h.ts
-                    routes = bgp_m.update.withdrawn
-                    #print routes
-                    for w in routes:
-                        if w == observed_prefix:
-                            print mrt_h.ts, bgp_h.src_as, bgp_h.dst_as
+                            if utype:
+                                #print mrt_h.ts, bgp_h.src_as, bgp_h.dst_as
+                                for at in bgp_m.update.attributes:
+                                    if at.type == dpkt.bgp.AS_PATH \
+                                            and at.as_path.segments[0].len > 1:
+                                        #print fname, mrt_h.ts
+                                        #print mrt_h.ts, bgp_h.src_as, bgp_h.dst_as
+                                        #print mrt_h.ts, bgp_m.update.attributes
+                                        return mrt_h.ts
+                            else:
+                                #print mrt_h.ts, bgp_h.src_as, bgp_h.dst_as
+                                #print bgp_m.update.attributes
+                                return mrt_h.ts
 
                 elif bgp_m.type == dpkt.bgp.NOTIFICATION:
                     continue
