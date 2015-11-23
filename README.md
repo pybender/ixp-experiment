@@ -1,22 +1,34 @@
-1. Introduction
-A simple IXP lab built with docker containers.
-#                                    _______
-#                                   |       |
-#                                   |   RS  |
-#                                   |_______|
-#                                       |
-#                                       |
-#  _____       _______               ___|___             _______
-# |     |     |       |             |       |           |       |
-# | H_1 |-----| ISP_A |-------------| IXPSW |-----------| ISP_B |
-# |_____|     |_______|             |_______|           |_______|
-#                                      |                   |
-#                                      |                   |
-#                                   ___|___             ___|___       _____
-#                                  |       |           |       |     |     |
-#                                  | ISP_C |-----------| ISP_D |-----| H_2 |
-#                                  |_______|           |_______|     |_____|
-#
+ Evaluate the convergence property of BGP in an IXP environment.
+ Here is the test topology
+                     ______
+                    |      |
+                    |  RS  |
+                    |______|
+                        |
+                        |
+   ______            ___|__            ______
+  |      |          |      |          |      |
+  | AS1  |--------+-| IXP  |-+--------| AST1 |--+   ______     ______
+  |______|        | |______| |        |______|  |  |      |   |      |
+   ______         |          |         ______   +--|TESTSW|---| AST3 |
+  |      |        |          |        |      |  |  |______|   |______|
+  | AS2  |--------+          +--------| AST2 |--+     
+  |______|        |                   |______|
+                  |
+   ______         |
+  |      |        |          
+  | ASn  |--------+          
+  |______|         
+
+ Here is how the tests are done
+ I. Test Design
+ 1. Announcement Tests.
+ How quick the network converge when AST1 announces prefixes.
+ Tests run with the number of member ASes from 10 to 100, step of 10, and
+ each test runs for 10 times
+ Prefix test:
+ 2. Withdrawal Tests
+ AST1 withdraws a prefix.
 
 2. Build
 2.1. Docker installation
